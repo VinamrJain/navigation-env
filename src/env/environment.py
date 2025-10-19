@@ -1,168 +1,173 @@
-import gymnasium as gym
-from gymnasium import spaces
-import numpy as np
-from typing import Tuple, Dict, Any, Optional
+"""Grid RL Environment following BLE architecture pattern."""
 
-from .utils.types import GridPosition, Displacement, VerticalAction, GridConfig
-from .field.abstract_field import AbstractField
-from .actor.abstract_actor import AbstractActor
+import time
+from typing import Tuple, Dict, Any, Optional, Union
+import gymnasium as gym
+import numpy as np
+import jax
+import jax.numpy as jnp
+
+from .arena.abstract_arena import AbstractArena
+from .rendering.renderer import Renderer
+
 
 class GridEnvironment(gym.Env):
-    """Gymnasium environment for discrete grid world with stochastic fields."""
+    """Grid RL Environment
     
-    metadata = {'render_modes': ['human', 'rgb_array']}
+    This class provides the Gymnasium RL interface by wrapping an Arena
+    that handles simulation and task logic. Follows the architecture pattern
+    from Balloon Learning Environment.
+    """
     
-    def __init__(self, 
-                 field: AbstractField,
-                 actor: AbstractActor,
-                 config: GridConfig,
-                 reward_fn: callable = None,
-                 max_steps: int = 1000):
-        """
-        Initialize grid environment.
+    def __init__(
+        self,
+        arena: AbstractArena,
+        max_steps: int = 1000,
+        seed: Optional[int] = None,
+        renderer: Optional[Renderer] = None
+    ):
+        """Initialize grid environment.
         
         Args:
-            field: Environmental field instance
-            actor: Actor instance  
-            config: Grid configuration
-            reward_fn: Reward function R(state, action) -> float
-            max_steps: Maximum episode length
+            arena: Arena instance containing simulator and task logic.
+            max_steps: Maximum steps per episode before truncation.
+            seed: Initial random seed (uses system time if None).
+            renderer: Optional renderer for visualization.
         """
         super().__init__()
         
-        self.field = field
-        self.actor = actor
-        self.config = config
-        self.reward_fn = reward_fn or self._default_reward
+        self.arena = arena
         self.max_steps = max_steps
+        self._renderer = renderer
+        self._episode_step = 0  ## TODO: may add a global step counter later?
         
-        # Action space: {-1, 0, +1} for vertical control
-        self.action_space = spaces.Discrete(3)
+        # Define action and observation spaces
+        self.action_space = gym.spaces.Discrete(3)  # 0=down, 1=stay, 2=up
+        self.observation_space = arena.observation_space
         
-        # Observation space: position + local displacement observation
-        self.observation_space = spaces.Dict({
-            'position': spaces.Box(
-                low=np.array([1, 1, 1]), 
-                high=np.array([config.n_x, config.n_y, config.n_z]),
-                dtype=np.int32
-            ),
-            'local_displacement': spaces.Box(
-                low=np.array([-config.d_max, -config.d_max]),
-                high=np.array([config.d_max, config.d_max]),
-                dtype=np.int32
-            )
-        })
+        # Set metadata for rendering
+        if renderer is not None:
+            self.metadata = {'render.modes': renderer.render_modes}
         
-        self.reset()
+        # Initialize RNG (use time if no seed provided)
+        seed = seed if seed is not None else int(time.time() * 1e6)
+        self.reset(seed=seed)
     
-    def reset(self, seed: Optional[int] = None, 
-              options: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Reset environment to initial state."""
-        super().reset(seed=seed)
+    def step(
+        self, action: int
+    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        """Execute one environment step (Gym API).
         
-        # Reset field and actor
-        self.field.reset(seed=seed)
-        self.actor.reset()
+        Args:
+            action: Discrete action (0=down, 1=stay, 2=up).
+            
+        Returns:
+            observation: Flat array [i, j, k, u_obs, v_obs].
+            reward: Scalar reward from arena.
+            terminated: Whether episode terminated naturally.
+            truncated: Whether episode was truncated (max_steps).
+            info: Additional information dictionary.
+        """
+        # Step arena (simulator)
+        observation = self.arena.step(action)
         
-        # Reset episode counters
-        self.step_count = 0
-        self.done = False
+        # Compute reward (arena-specific)
+        reward = self.arena.compute_reward()
         
-        # Get initial observation
-        obs = self._get_observation()
+        # Update renderer if present (renderer gets all info from arena state)
+        if self._renderer is not None:
+            self._renderer.step(self.arena.get_state())
+        
+        # Check termination
+        terminated = self.arena.is_terminal()
+        self._episode_step += 1
+        truncated = self._episode_step >= self.max_steps
+        
+        # Build info dict
         info = self._get_info()
         
-        return obs, info
+        return observation, reward, terminated, truncated, info
     
-    def step(self, action: int) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
-        """Execute one environment step."""
-        if self.done:
-            raise RuntimeError("Environment is done. Call reset() first.")
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[Dict[str, Any]] = None
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
+        """Reset environment (Gym API).
         
-        # Convert action to vertical action
-        vertical_action = VerticalAction(action - 1)  # Map {0,1,2} -> {-1,0,+1}
+        Args:
+            seed: Random seed for episode.
+            options: Additional options (unused).
+            
+        Returns:
+            observation: Initial observation.
+            info: Info dict (if return_info compatibility mode).
+        """
+        # Re-seed if provided
+        if seed is not None:
+            self.seed(seed)
         
-        # Sample horizontal displacement from field
-        horizontal_displacement = self.field.sample_displacement(self.actor.position)
+        # Split RNG key for arena
+        self._rng, arena_rng = jax.random.split(self._rng)
         
-        # Apply horizontal displacement (with boundary enforcement)
-        new_position_horizontal = self.field.enforce_boundaries(
-            self.actor.position, horizontal_displacement)
+        # Reset arena
+        observation = self.arena.reset(arena_rng)
         
-        # Update actor position horizontally
-        self.actor.position = GridPosition(
-            new_position_horizontal.i, 
-            new_position_horizontal.j, 
-            self.actor.position.k
-        )
+        # Reset renderer if present
+        if self._renderer is not None:
+            self._renderer.reset()
+            self._renderer.step(self.arena.get_state())
         
-        # Execute vertical action
-        self.actor.position = self.actor.step_vertical(vertical_action)
+        # Reset episode counter
+        self._episode_step = 0
         
-        # Compute reward
-        reward = self.reward_fn(self._get_state(), action)
-        
-        # Update episode counters
-        self.step_count += 1
-        
-        # Check termination conditions
-        terminated = self._is_terminated()
-        truncated = self.step_count >= self.max_steps
-        self.done = terminated or truncated
-        
-        # Get observation and info
-        obs = self._get_observation()
-        info = self._get_info()
-        info['horizontal_displacement'] = horizontal_displacement
-        
-        return obs, reward, terminated, truncated, info
+        # Gym 0.26+ returns (obs, info)
+        return observation, self._get_info()
     
-    def _get_observation(self) -> Dict[str, Any]:
-        """Construct observation from current state."""
-        # Sample displacement observation (what the agent observes)
-        local_displacement = self.field.sample_displacement(self.actor.position)
+    def render(self, mode: str = 'human') -> Union[None, np.ndarray, str]:
+        """Render environment (Gym API).
         
-        return {
-            'position': np.array([self.actor.position.i, 
-                                 self.actor.position.j, 
-                                 self.actor.position.k]),
-            'local_displacement': np.array([local_displacement.u, 
-                                          local_displacement.v])
-        }
+        Args:
+            mode: Rendering mode ('human', 'rgb_array', etc.).
+            
+        Returns:
+            None, RGB array, or string depending on mode.
+        """
+        if self._renderer is None:
+            return None
+        return self._renderer.render(mode)
     
-    def _get_state(self) -> Dict[str, Any]:
-        """Return complete environment state."""
-        return {
-            'actor': self.actor.get_state(),
-            'field': self.field.get_field_state(),
-            'step_count': self.step_count
-        }
+    def seed(self, seed: int) -> None:
+        """Seed the environment's RNG.
+        
+        Args:
+            seed: Random seed.
+        """
+        self._rng = jax.random.PRNGKey(seed)
+    
+    def close(self) -> None:
+        """Clean up resources."""
+        pass
+    
+    @property
+    def unwrapped(self) -> gym.Env:
+        """Return unwrapped environment (Gym property)."""
+        return self
     
     def _get_info(self) -> Dict[str, Any]:
-        """Return additional information."""
-        return {
-            'step_count': self.step_count,
-            'position': self.actor.position,
-            'is_terminal': self._is_terminated()
-        }
-    
-    def _is_terminated(self) -> bool:
-        """Check if episode should terminate."""
-        # Override in subclasses for specific termination conditions
-        return False
-    
-    def _default_reward(self, state: Dict[str, Any], action: int) -> float:
-        """Default reward function (override for specific objectives)."""
-        return 0.0
-    
-    def render(self, mode='human'):
-        """Render the environment."""
-        if mode == 'human':
-            print(f"Step: {self.step_count}, Position: {self.actor.position}")
-        elif mode == 'rgb_array':
-            # Return RGB array representation (implement as needed)
-            pass
-    
-    def close(self):
-        """Clean up environment resources."""
-        pass
+        """Construct info dictionary from complete arena state.
+        
+        Returns:
+            Dictionary with all arena state fields plus episode metadata.
+        """
+        state = self.arena.get_state()
+        
+        # Convert arena state to dict (includes all fields from subclasses)
+        info = state.to_dict()
+        
+        # Add environment-level metadata
+        info['episode_step'] = self._episode_step
+        info['is_terminal'] = self.arena.is_terminal()
+        
+        return info
