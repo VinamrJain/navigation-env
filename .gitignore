@@ -1,0 +1,15 @@
+.pixi
+*.egg-info
+.DS_Store
+__pycache__
+.pytest_cache/
+.vscode/
+.*cache
+
+*.html
+*.gif
+*.mp4
+
+results/
+multirun/
+outputs/

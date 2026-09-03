@@ -1,0 +1,40 @@
+# The checkers. `pixi.toml` holds the dependencies and the `check` task that runs them
+
+# beartype checks a Protocol by attribute name alone; mypy is what checks the signatures
+[tool.mypy]
+python_version = "3.14"
+files = ["zermelo"]
+disallow_untyped_defs = true
+
+# gpjax ships no `py.typed` marker, so mypy reports the import itself as an error
+[[tool.mypy.overrides]]
+module = ["gpjax.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 140
+# ruff 0.16 reformats Python fenced in Markdown
+extend-exclude = ["*.md"]
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+# Import sorting only, alphabetical
+[tool.ruff.lint]
+select = ["I"]
+
+# Must agree with `skip-magic-trailing-comma` above, or ruff warns that the two will fight
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.importlinter]
+root_package = "zermelo"
+
+[[tool.importlinter.contracts]]
+name = "Hierarchy of allowed imports (everything conforms to API set in zermelo.interface)"
+type = "layers"
+layers = [
+    "zermelo.experiments",
+    "zermelo.methods | zermelo.problems | zermelo.run",
+    "zermelo.interface",
+]

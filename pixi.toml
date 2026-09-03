@@ -1,0 +1,91 @@
+[workspace]
+channels = ["conda-forge"]
+name = "ambient-dynamics"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+check = "ruff format --check && ruff check && mypy && lint-imports && python -c 'import zermelo.experiments.ambient_waypoint.sweeps'"
+format = "ruff format && ruff check --fix"
+smoke = "python -m zermelo.experiments.ambient_waypoint +sweep=smoke && python -m zermelo.experiments.ambient_waypoint.metrics results/smoke"
+
+[tasks.crosscheck]
+cmd = "python -m checks.botorch_reference"
+description = "Validate our acquisition implementations against the standard ones in botorch"
+
+# Put `--` before any override or flag: `pixi run film acquisitions -- --arm all --dpi medium`
+[tasks.sweep]
+args = ["name"]
+cmd = "python -m zermelo.experiments.ambient_waypoint +sweep={{ name }}"
+description = "Run every cell of one sweep, one after another, in this process"
+
+[tasks.submit]
+args = ["name"]
+cmd = "python -m zermelo.experiments.ambient_waypoint +sweep={{ name }} hydra/launcher=slurm"
+description = "Submit one sweep as a Slurm array, on the partition its own resources block names"
+
+[tasks.draw]
+args = ["directory"]
+cmd = "python -m zermelo.experiments.ambient_waypoint.metrics {{ directory }}"
+description = "Draw the figures and metrics for one sweep or launch directory"
+
+# Same target and flags as `render`; `-- --help` lists them
+[tasks.film]
+args = ["target"]
+cmd = "python -m zermelo.experiments.ambient_waypoint.render {{ target }} --film"
+description = "Send films to the scheduler: the arms compared, one arm's seeds compared, or one episode alone"
+
+[tasks.render]
+args = ["target"]
+cmd = "python -m zermelo.experiments.ambient_waypoint.render {{ target }}"
+description = "Draw the same sheets as a still, at the last move or at the moves --moves names"
+
+[dependencies]
+python = ">=3.14"  # agrees with mypy's `python_version`; PEP 695 generics make 3.12 a hard floor
+numpy = ">=2.0.0"
+pyyaml = ">=6.0"
+pandas = ">=2.0.0"
+
+[feature.dev.dependencies]
+jupyter = ">=1.1.0"
+ipykernel = ">=6.0.0"
+ruff = ">=0.16,<1"
+mypy = ">=2.3.0,<3"
+import-linter = ">=2.13,<3"
+pandas-stubs = ">=2.0"
+
+[feature.viz.dependencies]
+matplotlib = ">=3.7.0"
+ffmpeg = ">=6"  # the binary `matplotlib.animation.FFMpegWriter` shells out to
+tectonic = ">=0.17.0,<0.18"
+
+[feature.gp.pypi-dependencies]
+gpjax = "==0.13.6"
+flax = ">=0.12.2"
+jax = ">=0.5.0"
+jaxlib = ">=0.5.0"
+optax = ">0.2.1"
+numpyro = ">=0.15.0"
+jaxtyping = ">0.2.10"
+beartype = ">0.16.1"
+tqdm = ">4.66.2"
+
+# No stable hydra starts on Python 3.14; `pixi.lock` pins these exactly
+[feature.sweep.pypi-dependencies]
+hydra-core = "==1.4.0.dev8"
+hydra-submitit-launcher = "==1.4.0.dev8"
+omegaconf = "==2.4.0.dev15"        # pinned explicitly: a range alone will not resolve to a pre-release
+
+
+[feature.cuda.tasks.smoke-gpu]
+cmd = "python -m zermelo.experiments.ambient_waypoint +sweep=smoke_gpu hydra/launcher=slurm"
+description = "Submit the smoke cells to a gpu node as a Slurm array, then draw the launch directory it prints"
+
+# The accelerator wheels; `default` runs on the processor
+[feature.cuda.pypi-dependencies]
+jax = { version = "==0.10.1", extras = ["cuda12"] }  # must match `default`'s jax: this env changes the device, not the toolchain
+
+[environments]
+default = { features = ["dev", "viz", "gp", "sweep"],         solve-group = "main" }
+cuda    = { features = ["dev", "viz", "gp", "sweep", "cuda"], solve-group = "main" }
