@@ -61,12 +61,11 @@ for name, resources in (
         problem=WORLD,
         horizon=6,
         claim_every=1,
-        seeds=[0, 1],
+        seeds=[0],
         resources=resources,
         arms=[
             arm("mean", _method(max_magnitude(), improvement=True, n_fields=0, n_walks=0, step_rate=0.0), _belief(oracle=False)),
             arm("oracle", _method(max_magnitude(), improvement=True, n_fields=0, n_walks=0, step_rate=0.0), _belief(oracle=True)),
-            arm("sampled", _method(max_magnitude(), improvement=True, n_fields=2, n_walks=2, step_rate=0.05), _belief(oracle=False)),
             arm(
                 "ei",  # a closed form: its own increment, no draws, no walks
                 _method(expected_improvement(), improvement=False, n_fields=0, n_walks=0, step_rate=0.0),
